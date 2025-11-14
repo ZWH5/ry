@@ -10,6 +10,9 @@ convert_case = { workspace = true }
 itertools = { workspace = true }
 reqwest = { workspace = true }
 serde = { workspace = true }
+scraper = "0.19"
+html-escape = "0.2"
+urlencoding = "2.1"
 
 common-models = { workspace = true }
 common-utils = { workspace = true }
