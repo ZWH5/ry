@@ -13,16 +13,43 @@ use scraper::{Html, Selector, element_ref::ElementRef};
 use serde::{Deserialize, Serialize};
 use traits::MediaProvider;
 use std::collections::HashMap;
+use std::time::Duration;
+use tokio::time::sleep;
+use std::sync::atomic::{AtomicU64, Ordering};
 
 #[derive(Debug, Clone)]
 pub struct GoogleBooksService {
     client: Client,
+    last_request_time: std::sync::Arc<std::sync::Mutex<std::time::Instant>>,
+}
+
+// 真实浏览器User-Agent列表
+const USER_AGENTS: &[&str] = &[
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/119.0.0.0 Safari/537.36",
+    "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:121.0) Gecko/20100101 Firefox/121.0",
+    "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.1 Safari/605.1.15",
+];
+
+/// 获取随机User-Agent
+fn get_random_user_agent() -> &'static str {
+    let index = (std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .subsec_nanos() as usize) % USER_AGENTS.len();
+    USER_AGENTS[index]
 }
 
 impl GoogleBooksService {
     pub async fn new(_config: &config_definition::GoogleBooksConfig) -> Result<Self> {
         let client = get_base_http_client(None);
-        Ok(Self { client })
+        Ok(Self { 
+            client,
+            last_request_time: std::sync::Arc::new(std::sync::Mutex::new(
+                std::time::Instant::now() - Duration::from_secs(10)
+            )),
+        })
     }
 }
 
@@ -93,14 +120,84 @@ impl MediaProvider for GoogleBooksService {
 }
 
 impl GoogleBooksService {
+    /// 获取HTML内容，包含反爬虫对策
     async fn fetch_html(&self, url: &str) -> Result<String> {
+        self.fetch_html_with_retry(url, 3).await
+    }
+
+    /// 带重试的HTML获取
+    async fn fetch_html_with_retry(&self, url: &str, max_retries: u32) -> Result<String> {
+        for attempt in 0..max_retries {
+            // 实施请求延迟
+            self.apply_request_delay().await;
+
+            match self.fetch_html_single(url).await {
+                Ok(content) => {
+                    // 检查是否被反爬虫阻止
+                    if content.contains("error_info") && content.contains("搜索访问太频繁") {
+                        if attempt < max_retries - 1 {
+                            // 指数退避重试
+                            let delay = Duration::from_secs(2_u64.pow(attempt + 1));
+                            eprintln!("⚠️ 被反爬虫限制，{}秒后重试...", delay.as_secs());
+                            sleep(delay).await;
+                            continue;
+                        }
+                    }
+                    return Ok(content);
+                }
+                Err(e) => {
+                    if attempt < max_retries - 1 {
+                        eprintln!("❌ 请求失败: {}，重试中...", e);
+                        sleep(Duration::from_secs(1 + attempt as u64)).await;
+                        continue;
+                    }
+                    return Err(e);
+                }
+            }
+        }
+        Err(anyhow!("Max retries exceeded"))
+    }
+
+    /// 单次HTML获取
+    async fn fetch_html_single(&self, url: &str) -> Result<String> {
         let resp = self
             .client
             .get(url)
-            .header("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36")
+            // 轮换User-Agent
+            .header("User-Agent", get_random_user_agent())
+            // 添加完整请求头，模拟真实浏览器
+            .header("Referer", "https://book.douban.com/")
+            .header("Accept", "text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8")
+            .header("Accept-Language", "zh-CN,zh;q=0.9,en-US;q=0.8,en;q=0.7")
+            .header("Accept-Encoding", "gzip, deflate, br")
+            .header("DNT", "1")
+            .header("Upgrade-Insecure-Requests", "1")
+            .header("Cache-Control", "max-age=0")
             .send()
             .await?;
         Ok(resp.text().await?)
+    }
+
+    /// 应用请求延迟，避免触发频率限制
+    async fn apply_request_delay(&self) {
+        if let Ok(mut last_time) = self.last_request_time.lock() {
+            let elapsed = last_time.elapsed();
+            // 确保两次请求间隔至少2秒，最多3秒
+            let min_delay = Duration::from_millis(2000);
+            let max_delay = Duration::from_millis(3000);
+            
+            if elapsed < min_delay {
+                // 计算需要等待的时间
+                let wait_time = if elapsed < Duration::from_millis(500) {
+                    max_delay - elapsed
+                } else {
+                    min_delay - elapsed
+                };
+                sleep(wait_time).await;
+            }
+            
+            *last_time = std::time::Instant::now();
+        }
     }
 
     fn parse_search_results(&self, html_content: &str) -> Result<(Vec<DoubanBook>, u64)> {
