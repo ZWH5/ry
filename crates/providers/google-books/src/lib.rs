@@ -8,15 +8,11 @@ use dependent_models::MetadataSearchSourceSpecifics;
 use dependent_models::SearchResults;
 use itertools::Itertools;
 use media_models::{BookSpecifics, MetadataDetails, MetadataFreeCreator, MetadataSearchItem};
-use reqwest::{
-    Client,
-    header::{HeaderName, HeaderValue},
-};
-use rust_decimal::Decimal;
+use reqwest::Client;
 use serde::{Deserialize, Serialize};
 use traits::MediaProvider;
 
-static URL: &str = "https://www.googleapis.com/books/v1/volumes";
+static URL: &str = "https://api.douban.com";
 
 #[derive(Debug, Clone)]
 pub struct GoogleBooksService {
@@ -24,53 +20,44 @@ pub struct GoogleBooksService {
 }
 
 impl GoogleBooksService {
-    pub async fn new(config: &config_definition::GoogleBooksConfig) -> Result<Self> {
-        let client = get_base_http_client(Some(vec![(
-            HeaderName::from_static("x-goog-api-key"),
-            HeaderValue::from_str(&config.api_key)?,
-        )]));
+    pub async fn new(_config: &config_definition::GoogleBooksConfig) -> Result<Self> {
+        let client = get_base_http_client(None);
         Ok(Self { client })
     }
 }
 
-#[derive(Serialize, Deserialize, Debug)]
-#[serde(rename_all = "camelCase")]
-struct ImageLinks {
-    extra_large: Option<String>,
-    large: Option<String>,
-    medium: Option<String>,
-    small: Option<String>,
-    small_thumbnail: Option<String>,
-    thumbnail: Option<String>,
+#[derive(Serialize, Deserialize, Debug, Clone)]
+pub struct DoubanBook {
+    pub id: String,
+    pub title: String,
+    pub image: Option<String>,
+    pub author: Option<Vec<String>>,
+    pub publisher: Option<String>,
+    pub pubdate: Option<String>,
+    pub pages: Option<i32>,
+    #[serde(default)]
+    pub tags: Option<Vec<DoubanTag>>,
+    pub summary: Option<String>,
 }
 
-#[derive(Serialize, Deserialize, Debug)]
-#[serde(rename_all = "camelCase")]
-struct ItemVolumeInfo {
-    title: String,
-    average_rating: Option<Decimal>,
-    published_date: Option<String>,
-    image_links: Option<ImageLinks>,
-    description: Option<String>,
-    authors: Option<Vec<String>>,
-    publisher: Option<String>,
-    main_category: Option<String>,
-    categories: Option<Vec<String>>,
-    page_count: Option<i32>,
+#[derive(Serialize, Deserialize, Debug, Clone)]
+pub struct DoubanTag {
+    pub name: String,
+    pub count: Option<u32>,
 }
 
-#[derive(Serialize, Deserialize, Debug)]
-#[serde(rename_all = "camelCase")]
-struct ItemResponse {
-    id: String,
-    volume_info: ItemVolumeInfo,
+#[derive(Serialize, Deserialize, Debug, Clone)]
+pub struct DoubanSearchResult {
+    pub books: Vec<DoubanBook>,
+    pub total: u64,
 }
 
-#[derive(Serialize, Deserialize, Debug)]
-#[serde(rename_all = "camelCase")]
-struct SearchResponse {
-    total_items: u64,
-    items: Option<Vec<ItemResponse>>,
+fn parse_date_to_year(date_str: &str) -> Option<i32> {
+    if date_str.len() >= 4 {
+        date_str[..4].parse().ok()
+    } else {
+        None
+    }
 }
 
 #[async_trait]
@@ -78,12 +65,11 @@ impl MediaProvider for GoogleBooksService {
     async fn metadata_details(&self, identifier: &str) -> Result<MetadataDetails> {
         let rsp = self
             .client
-            .get(format!("{URL}/{identifier}"))
+            .get(format!("{URL}/book/{identifier}"))
             .send()
             .await?;
-        let data: ItemResponse = rsp.json().await?;
-        let d = self.google_books_response_to_search_response(data.volume_info, data.id);
-        Ok(d)
+        let book_data: DoubanBook = rsp.json().await?;
+        Ok(self.douban_book_to_metadata_details(book_data, identifier.to_string()))
     }
 
     async fn metadata_search(
@@ -91,92 +77,55 @@ impl MediaProvider for GoogleBooksService {
         page: u64,
         query: &str,
         _display_nsfw: bool,
-        source_specifics: &Option<MetadataSearchSourceSpecifics>,
+        _source_specifics: &Option<MetadataSearchSourceSpecifics>,
     ) -> Result<SearchResults<MetadataSearchItem>> {
-        let index = page.saturating_sub(1) * PAGE_SIZE;
-        let pass_raw_query = source_specifics
-            .as_ref()
-            .and_then(|s| s.google_books.as_ref().and_then(|g| g.pass_raw_query))
-            .unwrap_or(false);
+        let start = (page.saturating_sub(1) * PAGE_SIZE) as u32;
         let rsp = self
             .client
-            .get(URL)
+            .get(format!("{URL}/book/search"))
             .query(&[
-                ("printType", "books"),
-                ("startIndex", &index.to_string()),
-                ("maxResults", &PAGE_SIZE.to_string()),
-                (
-                    "q",
-                    &match pass_raw_query {
-                        true => query.to_owned(),
-                        false => format!("intitle:{query}"),
-                    },
-                ),
+                ("q", query),
+                ("count", &PAGE_SIZE.to_string()),
+                ("start", &start.to_string()),
             ])
             .send()
             .await?;
-        let search: SearchResponse = rsp.json().await?;
+        let search: DoubanSearchResult = rsp.json().await?;
         let resp = search
-            .items
-            .unwrap_or_default()
+            .books
             .into_iter()
             .map(|b| {
-                let MetadataDetails {
-                    title,
-                    assets,
-                    publish_year,
-                    ..
-                } = self.google_books_response_to_search_response(b.volume_info, b.id.clone());
-                let image = assets.remote_images.first().cloned();
+                let image = b.image.clone();
+                let publish_year = b.pubdate.as_ref().and_then(|d| parse_date_to_year(d));
                 MetadataSearchItem {
-                    title,
+                    title: b.title,
                     image,
                     publish_year,
                     identifier: b.id,
                 }
             })
             .collect();
-        let next_page = compute_next_page(page, PAGE_SIZE, search.total_items);
+        let next_page = compute_next_page(page, PAGE_SIZE, search.total);
         Ok(SearchResults {
             items: resp,
             details: SearchDetails {
                 next_page,
-                total_items: search.total_items,
+                total_items: search.total,
             },
         })
     }
 }
 
 impl GoogleBooksService {
-    fn google_books_response_to_search_response(
+    fn douban_book_to_metadata_details(
         &self,
-        item: ItemVolumeInfo,
-        id: String,
+        book: DoubanBook,
+        identifier: String,
     ) -> MetadataDetails {
-        let mut images = vec![];
-        if let Some(il) = item.image_links {
-            if let Some(a) = il.thumbnail {
-                images.push(a);
-            }
-            if let Some(a) = il.small_thumbnail {
-                images.push(a);
-            }
-            if let Some(a) = il.small {
-                images.push(a);
-            }
-            if let Some(a) = il.medium {
-                images.push(a);
-            }
-            if let Some(a) = il.large {
-                images.push(a);
-            }
-            if let Some(a) = il.extra_large {
-                images.push(a);
-            }
-        };
-        let remote_images = images.into_iter().unique().collect();
-        let mut creators = item
-            .authors
+        let remote_images = book.image.as_ref().map(|img| vec![img.clone()]).unwrap_or_default();
+        
+        let mut creators = book
+            .author
             .unwrap_or_default()
             .into_iter()
             .map(|a| MetadataFreeCreator {
@@ -184,40 +133,41 @@ impl GoogleBooksService {
                 role: "Author".to_owned(),
             })
             .collect_vec();
-        if let Some(p) = item.publisher {
+        
+        if let Some(p) = book.publisher {
             creators.push(MetadataFreeCreator {
                 name: p,
                 role: "Publisher".to_owned(),
             });
         }
-        let mut genres = item
-            .categories
+
+        let genres = book
+            .tags
             .unwrap_or_default()
             .into_iter()
-            .flat_map(|c| c.split(" / ").map(|g| g.to_case(Case::Title)).collect_vec())
-            .collect_vec();
-        if let Some(g) = item.main_category {
-            genres.push(g);
-        }
+            .map(|tag| tag.name.to_case(Case::Title))
+            .unique()
+            .collect();
+
         let assets = EntityAssets {
             remote_images,
             ..Default::default()
         };
+
         MetadataDetails {
             assets,
-            title: item.title.clone(),
-            description: item.description,
-            provider_rating: item.average_rating,
-            genres: genres.into_iter().unique().collect(),
-            creators: creators.into_iter().unique().collect(),
-            publish_year: item.published_date.and_then(|d| convert_date_to_year(&d)),
+            title: book.title.clone(),
+            description: book.summary,
+            genres,
+            creators,
+            publish_year: book.pubdate.as_ref().and_then(|d| parse_date_to_year(d)),
             book_specifics: Some(BookSpecifics {
-                pages: item.page_count,
+                pages: book.pages,
                 ..Default::default()
             }),
             source_url: Some(format!(
-                "https://www.google.co.in/books/edition/{}/{}",
-                item.title, id
+                "https://book.douban.com/subject/{}/",
+                identifier
             )),
             ..Default::default()
         }
@@ -227,12 +177,12 @@ impl GoogleBooksService {
     pub async fn id_from_isbn(&self, isbn: &str) -> Option<String> {
         let resp = self
             .client
-            .get(URL)
-            .query(&[("q", &format!("isbn:{}", isbn))])
+            .get(format!("{URL}/book/search"))
+            .query(&[("q", isbn)])
             .send()
             .await
             .ok()?;
-        let search: SearchResponse = resp.json().await.ok()?;
-        Some(search.items?.first()?.id.clone())
+        let search: DoubanSearchResult = resp.json().await.ok()?;
+        Some(search.books.first()?.id.clone())
     }
 }
