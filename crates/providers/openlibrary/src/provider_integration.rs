@@ -18,7 +18,7 @@ use crate::{
     models::{
         AuthorLibrarySearchResponse, BookSearchItem, BookSearchResults, Description,
         EditionsResponse, MediaLibrarySearchResponse, MetadataDetailsAuthorResponse,
-        MetadataDetailsBook, OpenlibraryService, PersonDetailsAuthor,
+        MetadataDetailsBook, OpenlibraryService, PersonDetailsAuthor, DoubanBook, DoubanSearchResult,
     },
     utilities::{get_key, parse_date, parse_date_flexible},
 };
@@ -34,30 +34,31 @@ impl MediaProvider for OpenlibraryService {
     ) -> Result<SearchResults<PeopleSearchItem>> {
         let rsp = self
             .client
-            .get(format!("{URL}/search/authors.json"))
-            .query(&[
-                ("q", query),
-                ("limit", &PAGE_SIZE.to_string()),
-                ("offset", &(page.saturating_sub(1) * PAGE_SIZE).to_string()),
-            ])
+            .get(format!("{URL}/book/search?q=author:{}&count={}&start={}", 
+                query, PAGE_SIZE, (page.saturating_sub(1) * PAGE_SIZE)))
             .send()
             .await?;
-        let search: AuthorLibrarySearchResponse = rsp.json().await?;
+        let search: DoubanSearchResult = rsp.json().await?;
         let resp = search
-            .docs
+            .books
             .into_iter()
-            .map(|d| PeopleSearchItem {
-                name: d.name,
-                identifier: get_key(&d.key),
-                birth_year: d.birth_date.and_then(|b| parse_date(&b)).map(|d| d.year()),
-                ..Default::default()
+            .filter_map(|book| {
+                book.author.as_ref().and_then(|authors| {
+                    authors.first().map(|author_name| PeopleSearchItem {
+                        name: author_name.clone(),
+                        identifier: author_name.clone(),
+                        birth_year: None,
+                        ..Default::default()
+                    })
+                })
             })
+            .unique_by(|p| p.identifier.clone())
             .collect_vec();
         let data = SearchResults {
             items: resp,
             details: SearchDetails {
-                total_items: search.num_found,
-                next_page: compute_next_page(page, PAGE_SIZE, search.num_found),
+                total_items: search.total,
+                next_page: compute_next_page(page, PAGE_SIZE, search.total),
             },
         };
         Ok(data)
@@ -70,39 +71,20 @@ impl MediaProvider for OpenlibraryService {
     ) -> Result<PersonDetails> {
         let rsp = self
             .client
-            .get(format!("{URL}/authors/{identifier}.json"))
+            .get(format!("{URL}/book/search?q=author:{}&count=1", identifier))
             .send()
             .await?;
-        let data: PersonDetailsAuthor = rsp.json().await?;
-        ryot_log!(debug, "Got person data: {:?}", data);
-        let description = data.bio.map(|d| match d {
-            Description::Text(s) => s,
-            Description::Nested { value, .. } => value,
-        });
-        let images = data
-            .photos
-            .unwrap_or_default()
-            .into_iter()
-            .filter(|c| c > &0)
-            .map(|c| self.get_author_cover_image_url(c))
-            .unique()
-            .collect();
-        let source_url = data
-            .links
-            .unwrap_or_default()
-            .first()
-            .and_then(|l| l.url.clone())
-            .unwrap_or_else(|| format!("https://openlibrary.org{}", data.key));
-        let birth_date = data.birth_date.and_then(|d| parse_date_flexible(&d));
-        let death_date = data.death_date.and_then(|d| parse_date_flexible(&d));
+        let data: DoubanSearchResult = rsp.json().await?;
+        let book = data.books.first().ok_or(anyhow::anyhow!("Author not found"))?;
+        
         Ok(PersonDetails {
-            death_date,
-            birth_date,
-            description,
-            name: data.name,
-            source_url: Some(source_url),
+            death_date: None,
+            birth_date: None,
+            description: book.summary.clone(),
+            name: identifier.to_string(),
+            source_url: Some(format!("https://book.douban.com/author/{}/", identifier)),
             assets: EntityAssets {
-                remote_images: images,
+                remote_images: book.image.as_ref().map(|img| vec![img.clone()]).unwrap_or_default(),
                 ..Default::default()
             },
             ..Default::default()
@@ -112,100 +94,44 @@ impl MediaProvider for OpenlibraryService {
     async fn metadata_details(&self, identifier: &str) -> Result<MetadataDetails> {
         let rsp = self
             .client
-            .get(format!("{URL}/works/{identifier}.json"))
+            .get(format!("{URL}/book/{}", identifier))
             .send()
             .await?;
-        let data: MetadataDetailsBook = rsp.json().await?;
-        ryot_log!(debug, "Openlibrary response: {:?}", data);
-
-        let rsp = self
-            .client
-            .get(format!("{URL}/works/{identifier}/editions.json"))
-            .send()
-            .await?;
-        let editions: EditionsResponse = rsp.json().await?;
-
-        let num_pages = editions
-            .entries
-            .as_ref()
-            .and_then(|e| {
-                e.iter()
-                    .filter_map(|e| e.number_of_pages)
-                    .max_by(|a, b| a.cmp(b))
-            })
-            .unwrap_or_default();
-
-        let first_release_date = editions.entries.as_ref().and_then(|entries| {
-            entries
-                .iter()
-                .filter_map(|e| e.publish_date.as_ref())
-                .filter_map(|d| parse_date_flexible(d))
-                .min()
-        });
+        let book_data: DoubanBook = rsp.json().await?;
+        ryot_log!(debug, "Douban book response: {:?}", book_data);
 
         let mut people = vec![];
-        for a in data.authors.iter().flatten() {
-            let (key, role) = match a {
-                MetadataDetailsAuthorResponse::Flat(s) => (s.key.to_owned(), "Author".to_owned()),
-                MetadataDetailsAuthorResponse::Nested(s) => (
-                    s.author.key.to_owned(),
-                    s.role
-                        .as_ref()
-                        .map(|r| r.key.clone())
-                        .unwrap_or_else(|| "Author".to_owned()),
-                ),
-            };
+        for author_name in book_data.author.iter().flatten() {
             people.push(PartialMetadataPerson {
-                role,
-                identifier: get_key(&key),
+                role: "Author".to_owned(),
+                identifier: author_name.clone(),
                 source: MediaSource::Openlibrary,
                 ..Default::default()
             });
         }
-        let description = data.description.map(|d| match d {
-            Description::Text(s) => s,
-            Description::Nested { value, .. } => value,
-        });
 
-        let mut images = vec![];
-        for c in data.covers.iter().flatten() {
-            images.push(*c);
-        }
-        for entry in editions.entries.iter().flatten() {
-            if let Some(covers) = &entry.covers {
-                for c in covers {
-                    images.push(*c);
-                }
-            }
-        }
-
-        let remote_images = images
-            .into_iter()
-            .filter(|c| c > &0)
-            .map(|c| self.get_book_cover_image_url(c))
-            .unique()
-            .collect();
-
-        let genres = data
-            .subjects
-            .unwrap_or_default()
-            .into_iter()
-            .flat_map(|s| s.split(", ").map(|d| d.to_case(Case::Title)).collect_vec())
+        let genres = book_data
+            .tags
+            .iter()
+            .flatten()
+            .map(|tag| tag.name.to_case(Case::Title))
             .collect_vec();
 
-        let identifier = get_key(&data.key);
+        let publish_year = book_data.pubdate.as_ref().and_then(|date| {
+            parse_date_flexible(date).map(|d| d.year())
+        });
+
+        let remote_images = book_data.image.as_ref().map(|img| vec![img.clone()]).unwrap_or_default();
+
         Ok(MetadataDetails {
             people,
             genres,
-            description,
-            title: data.title.clone(),
-            publish_year: first_release_date.map(|d| d.year()),
-            source_url: Some(format!(
-                "https://openlibrary.org/works/{}/{}",
-                identifier, data.title
-            )),
+            description: book_data.summary,
+            title: book_data.title.clone(),
+            publish_year,
+            source_url: Some(format!("https://book.douban.com/subject/{}/", identifier)),
             book_specifics: Some(BookSpecifics {
-                pages: Some(num_pages),
+                pages: book_data.pages,
                 ..Default::default()
             }),
             assets: EntityAssets {
@@ -223,47 +149,35 @@ impl MediaProvider for OpenlibraryService {
         _display_nsfw: bool,
         _source_specifics: &Option<MetadataSearchSourceSpecifics>,
     ) -> Result<SearchResults<MetadataSearchItem>> {
-        let fields = [
-            "key",
-            "title",
-            "author_name",
-            "cover_i",
-            "first_publish_year",
-        ]
-        .join(",");
         let rsp = self
             .client
-            .get(format!("{URL}/search.json"))
-            .query(&[
-                ("q", query),
-                ("type", "work"),
-                ("fields", &fields),
-                ("limit", &PAGE_SIZE.to_string()),
-                ("offset", &(page.saturating_sub(1) * PAGE_SIZE).to_string()),
-            ])
+            .get(format!("{URL}/book/search?q={}&count={}&start={}", 
+                query, PAGE_SIZE, (page.saturating_sub(1) * PAGE_SIZE)))
             .send()
             .await?;
-        let search: MediaLibrarySearchResponse = rsp.json().await?;
+        let search: DoubanSearchResult = rsp.json().await?;
         let resp = search
-            .docs
-            .into_iter()
-            .map(|d| {
-                let images = Vec::from_iter(d.cover_i.map(|f| self.get_book_cover_image_url(f)));
+            .books
+            .iter()
+            .map(|book| {
+                let images = book.image.as_ref().map(|img| img.clone()).into_iter().collect_vec();
                 BookSearchItem {
                     images,
-                    title: d.title,
-                    identifier: get_key(&d.key),
-                    publish_year: d.first_publish_year,
-                    author_names: d.author_name.unwrap_or_default(),
+                    title: book.title.clone(),
+                    identifier: book.id.clone(),
+                    publish_year: book.pubdate.as_ref().and_then(|date| {
+                        parse_date_flexible(date).map(|d| d.year())
+                    }),
+                    author_names: book.author.clone().unwrap_or_default(),
                     ..Default::default()
                 }
             })
             .collect_vec();
         let data = BookSearchResults {
-            total: search.num_found,
+            total: search.total,
             items: resp,
         };
-        let next_page = compute_next_page(page, PAGE_SIZE, search.num_found);
+        let next_page = compute_next_page(page, PAGE_SIZE, search.total);
         Ok(SearchResults {
             details: SearchDetails {
                 next_page,
