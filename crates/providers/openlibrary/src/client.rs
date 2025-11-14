@@ -1,4 +1,4 @@
-use anyhow::Result;
+﻿use anyhow::Result;
 use common_utils::get_base_http_client;
 
 use crate::{
@@ -6,8 +6,8 @@ use crate::{
     utilities::get_key,
 };
 
-pub static URL: &str = "https://api.douban.com";
-pub static IMAGE_BASE_URL: &str = "https://img1.doubanio.com";
+pub static URL: &str = "https://openlibrary.org";
+pub static IMAGE_BASE_URL: &str = "https://covers.openlibrary.org";
 
 impl OpenlibraryService {
     pub async fn new(config: &config_definition::OpenlibraryConfig) -> Result<Self> {
@@ -19,27 +19,30 @@ impl OpenlibraryService {
         })
     }
 
-    pub fn get_book_cover_image_url(&self, image_url: &str) -> String {
-        image_url.to_string()
+    pub fn get_book_cover_image_url(&self, c: i64) -> String {
+        self.get_cover_image_url("b", c)
     }
 
-    pub fn get_author_cover_image_url(&self, image_url: &str) -> String {
-        image_url.to_string()
+    pub fn get_author_cover_image_url(&self, c: i64) -> String {
+        self.get_cover_image_url("a", c)
     }
 
-    pub fn get_cover_image_url(&self, _t: &str, _c: i64) -> String {
-        String::new()
+    pub fn get_cover_image_url(&self, t: &str, c: i64) -> String {
+        format!(
+            "{}/{}/id/{}-{}.jpg?default=false",
+            self.image_url, t, c, self.image_size
+        )
     }
 
     pub async fn id_from_isbn(&self, isbn: &str) -> Option<String> {
         self.client
-            .get(format!("{URL}/book/search?q={isbn}&count=1"))
+            .get(format!("{URL}/isbn/{isbn}.json"))
             .send()
             .await
             .ok()?
             .json::<MetadataDetailsBook>()
             .await
             .ok()
-            .and_then(|data| data.books.and_then(|mut books| books.pop().map(|b| b.id)))
+            .map(|data| get_key(&data.key))
     }
 }

@@ -1,4 +1,4 @@
-use chrono::NaiveDate;
+﻿use chrono::NaiveDate;
 use reqwest::Client;
 use serde::{Deserialize, Serialize};
 
@@ -109,56 +109,12 @@ pub enum MetadataDetailsAuthorResponse {
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct MetadataDetailsBook {
-    #[serde(default)]
     pub key: String,
-    #[serde(default)]
     pub title: String,
-    #[serde(default)]
     pub covers: Option<Vec<i64>>,
-    #[serde(default)]
     pub subjects: Option<Vec<String>>,
-    #[serde(default)]
     pub description: Option<Description>,
-    #[serde(default)]
     pub authors: Option<Vec<MetadataDetailsAuthorResponse>>,
-    #[serde(default)]
-    pub books: Option<Vec<DoubanBook>>,
-    #[serde(default)]
-    pub id: Option<String>,
-    #[serde(default)]
-    pub image: Option<String>,
-    #[serde(default)]
-    pub author: Option<Vec<String>>,
-    #[serde(default)]
-    pub publisher: Option<String>,
-    #[serde(default)]
-    pub pubdate: Option<String>,
-    #[serde(default)]
-    pub pages: Option<i32>,
-    #[serde(default)]
-    pub tags: Option<Vec<DoubanTag>>,
-    #[serde(default)]
-    pub summary: Option<String>,
-}
-
-#[derive(Debug, Serialize, Deserialize, Clone)]
-pub struct DoubanBook {
-    pub id: String,
-    pub title: String,
-    pub image: Option<String>,
-    pub author: Option<Vec<String>>,
-    pub publisher: Option<String>,
-    pub pubdate: Option<String>,
-    pub pages: Option<i32>,
-    #[serde(default)]
-    pub tags: Option<Vec<DoubanTag>>,
-    pub summary: Option<String>,
-}
-
-#[derive(Debug, Serialize, Deserialize, Clone)]
-pub struct DoubanTag {
-    pub name: String,
-    pub count: Option<u32>,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -170,18 +126,4 @@ pub struct MetadataSearchBook {
     pub first_publish_year: Option<i32>,
     pub author_name: Option<Vec<String>>,
     pub number_of_pages_median: Option<i32>,
-}
-
-#[derive(Debug, Serialize, Deserialize, Clone)]
-pub struct DoubanSearchResult {
-    pub books: Vec<DoubanBook>,
-    pub total: u64,
-}
-
-#[derive(Debug, Serialize, Deserialize, Clone)]
-pub struct DoubanAuthor {
-    pub id: String,
-    pub name: String,
-    pub image: Option<String>,
-    pub intro: Option<String>,
 }
