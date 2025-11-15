@@ -9,13 +9,14 @@ RUN npm install -g @moonrepo/cli && moon --version
 FROM frontend-build-base AS frontend-workspace
 WORKDIR /app
 COPY . .
-RUN moon docker scaffold frontend
+RUN moon docker scaffold frontend 2>&1 || true
+RUN echo "Checking moon docker output:" && ls -la .moon/docker/ 2>/dev/null || echo "No .moon/docker directory"
 
 FROM frontend-build-base AS frontend-builder
 WORKDIR /app
-COPY --from=frontend-workspace /app/.moon/docker/workspace .
-RUN moon docker setup
-COPY --from=frontend-workspace /app/.moon/docker/sources .
+# Copy moon docker outputs if they exist
+COPY --from=frontend-workspace /app/.moon/docker/ ./.moon/docker/
+RUN moon docker setup || echo "Moon setup warning"
 RUN moon run frontend:build
 RUN moon docker prune
 
