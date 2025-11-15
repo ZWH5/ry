@@ -3,7 +3,6 @@ use async_trait::async_trait;
 use common_models::{EntityAssets, SearchDetails};
 use common_utils::get_base_http_client;
 use common_utils::{PAGE_SIZE, compute_next_page};
-use convert_case::{Case, Casing};
 use dependent_models::MetadataSearchSourceSpecifics;
 use dependent_models::SearchResults;
 use itertools::Itertools;
@@ -12,10 +11,8 @@ use reqwest::Client;
 use scraper::{Html, Selector, element_ref::ElementRef};
 use serde::{Deserialize, Serialize};
 use traits::MediaProvider;
-use std::collections::HashMap;
 use std::time::Duration;
 use tokio::time::sleep;
-use std::sync::atomic::{AtomicU64, Ordering};
 
 #[derive(Debug, Clone)]
 pub struct GoogleBooksService {
@@ -313,21 +310,23 @@ impl GoogleBooksService {
                 if text.starts_with("作者") {
                     // 从父元素中提取作者链接
                     if let Some(parent) = element.parent() {
-                        if let Ok(link_sel) = Selector::parse("a") {
-                            let authors: Vec<String> = parent
-                                .select(&link_sel)
-                                .filter_map(|a| {
-                                    let href = a.value().attr("href").unwrap_or("");
-                                    if href.contains("/author") || href.contains("/search") {
-                                        Some(self.get_element_text(&a))
-                                    } else {
-                                        None
-                                    }
-                                })
-                                .filter(|a| !a.is_empty() && a.len() < 100)
-                                .collect();
-                            if !authors.is_empty() {
-                                book.author = Some(authors);
+                        if let Some(parent_elem) = ElementRef::wrap(parent) {
+                            if let Ok(link_sel) = Selector::parse("a") {
+                                let authors: Vec<String> = parent_elem
+                                    .select(&link_sel)
+                                    .filter_map(|a| {
+                                        let href = a.value().attr("href").unwrap_or("");
+                                        if href.contains("/author") || href.contains("/search") {
+                                            Some(self.get_element_text(&a))
+                                        } else {
+                                            None
+                                        }
+                                    })
+                                    .filter(|a| !a.is_empty() && a.len() < 100)
+                                    .collect();
+                                if !authors.is_empty() {
+                                    book.author = Some(authors);
+                                }
                             }
                         }
                     }

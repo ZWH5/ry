@@ -13,6 +13,7 @@ serde = { workspace = true }
 scraper = "0.19"
 html-escape = "0.2"
 urlencoding = "2.1"
+tokio = { workspace = true }
 
 common-models = { workspace = true }
 common-utils = { workspace = true }
