@@ -177,24 +177,23 @@ impl GoogleBooksService {
 
     /// 应用请求延迟，避免触发频率限制
     async fn apply_request_delay(&self) {
-        if let Ok(mut last_time) = self.last_request_time.lock().await {
-            let elapsed = last_time.elapsed();
-            // 确保两次请求间隔至少2秒，最多3秒
-            let min_delay = Duration::from_millis(2000);
-            let max_delay = Duration::from_millis(3000);
-            
-            if elapsed < min_delay {
-                // 计算需要等待的时间
-                let wait_time = if elapsed < Duration::from_millis(500) {
-                    max_delay - elapsed
-                } else {
-                    min_delay - elapsed
-                };
-                sleep(wait_time).await;
-            }
-            
-            *last_time = std::time::Instant::now();
+        let mut last_time = self.last_request_time.lock().await;
+        let elapsed = last_time.elapsed();
+        // 确保两次请求间隔至少2秒，最多3秒
+        let min_delay = Duration::from_millis(2000);
+        let max_delay = Duration::from_millis(3000);
+        
+        if elapsed < min_delay {
+            // 计算需要等待的时间
+            let wait_time = if elapsed < Duration::from_millis(500) {
+                max_delay - elapsed
+            } else {
+                min_delay - elapsed
+            };
+            sleep(wait_time).await;
         }
+        
+        *last_time = std::time::Instant::now();
     }
 
     fn parse_search_results(&self, html_content: &str) -> Result<(Vec<DoubanBook>, u64)> {
