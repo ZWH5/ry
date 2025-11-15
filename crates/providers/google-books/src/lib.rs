@@ -17,7 +17,7 @@ use tokio::time::sleep;
 #[derive(Debug, Clone)]
 pub struct GoogleBooksService {
     client: Client,
-    last_request_time: std::sync::Arc<std::sync::Mutex<std::time::Instant>>,
+    last_request_time: std::sync::Arc<tokio::sync::Mutex<std::time::Instant>>,
 }
 
 // 真实浏览器User-Agent列表
@@ -43,7 +43,7 @@ impl GoogleBooksService {
         let client = get_base_http_client(None);
         Ok(Self { 
             client,
-            last_request_time: std::sync::Arc::new(std::sync::Mutex::new(
+            last_request_time: std::sync::Arc::new(tokio::sync::Mutex::new(
                 std::time::Instant::now() - Duration::from_secs(10)
             )),
         })
@@ -177,7 +177,7 @@ impl GoogleBooksService {
 
     /// 应用请求延迟，避免触发频率限制
     async fn apply_request_delay(&self) {
-        if let Ok(mut last_time) = self.last_request_time.lock() {
+        if let Ok(mut last_time) = self.last_request_time.lock().await {
             let elapsed = last_time.elapsed();
             // 确保两次请求间隔至少2秒，最多3秒
             let min_delay = Duration::from_millis(2000);
